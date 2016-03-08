@@ -51,6 +51,11 @@ class BaseApp (cli.Base):
   Utilities for developing an artificial pancreas system.
   openaps helps you manage and structure reports for various devices.
 
+       .-. .,-.  .-. .--. .-.  .,-. .--.
+      (   )|   )(.-' |  |(   ) |   )`--.
+       `-' |`-'  `--''  `-`-'`-|`-' `--'
+           |                   |        
+           '                   '        
 Common workflows:
 
 Getting started:
@@ -142,6 +147,7 @@ openaps report commands map openaps use commands to filenames:
   def run (self, args):
     if args.config:
       os.environ['OPENAPS_CONFIG'] = args.config
+      os.chdir(os.path.dirname(args.config))
     if args.command in ['help', None]:
       self.parser.print_help( )
     elif builtins.is_builtin(args.command):

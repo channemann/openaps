@@ -17,6 +17,8 @@ class Configurable (object):
     if k not in self.required + self.optional:
       self.optional.append(k)
 
+  def get (self, k, *args):
+    return self.fields.get(k, *args)
   def items (self):
     return self.fields.items( )
 
@@ -33,6 +35,12 @@ class Configurable (object):
   def remove (self, config):
     config.remove_device(self)
 
+  @classmethod
+  def FromImport (klass, candidate, config=None):
+    name = candidate.get('name')
+    fields = candidate.get(name)
+    inst = klass(name, **fields)
+    return inst
   @classmethod
   def FromConfig (klass, config):
     items = [ ]

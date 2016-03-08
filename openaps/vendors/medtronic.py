@@ -5,6 +5,7 @@ Medtronic - openaps driver for Medtronic
 from openaps.uses.use import Use
 from openaps.uses.registry import Registry
 from openaps.configurable import Configurable
+from openaps.glucose.convert import Convert as GlucoseConvert
 import decocare
 import argparse
 import json
@@ -51,6 +52,7 @@ class scan (Use):
 import logging
 import logging.handlers
 class MedtronicTask (scan):
+  MAX_SESSION_DURATION = 10
   requires_session = True
   save_session = True
   record_stats = True
@@ -60,7 +62,7 @@ class MedtronicTask (scan):
     if self.requires_session:
       self.check_session(app)
     else:
-      self.pump.setModel(number=self.device.fields.get('model', ''))
+      self.pump.setModel(number=self.device.get('model', ''))
 
   def after_main (self, args, app):
     if self.save_session:
@@ -70,30 +72,37 @@ class MedtronicTask (scan):
       self.uart.close( )
 
   def get_session_info (self):
-    expires = self.device.fields.get('expires', None)
+    expires = self.device.get('expires', None)
+    if expires is not None:
+      expires = parse(expires)
+
     now = datetime.now( )
     out = dict(device=self.device.name
       , vendor=__name__
       , used=now
       )
-    if expires is None or parse(expires) < now:
+    if expires is None or expires < now or (expires - now).total_seconds() > (60 * self.MAX_SESSION_DURATION):
       fields = self.create_session( )
       out.update(**self.update_session_info(fields))
     else:
-      out['expires'] = parse(expires)
-      out['model'] = self.get_model( )
+      out['expires'] = expires
+      out['model'] = self.device.get('model', None)
     return out
 
   def update_session_info (self, fields):
     out = { }
-    self.device.add_option('expires', fields['expires'].isoformat( ))
-    self.device.add_option('model', fields['model'])
+    uses_extra = self.device.get('extra', None)
+    config = self.device
+    if uses_extra:
+      config = self.device.extra
+    config.add_option('expires', fields['expires'].isoformat( ))
+    config.add_option('model', fields['model'])
     out['expires'] = fields['expires']
     out['model'] = fields['model']
     return out
 
   def create_session (self):
-    minutes = int(self.device.fields.get('minutes', 10))
+    minutes = int(self.device.get('minutes', 3))
     now = datetime.now( )
     self.pump.power_control(minutes=minutes)
     model = self.get_model( )
@@ -108,17 +117,29 @@ class MedtronicTask (scan):
     return out
   def check_session (self, app):
     self.session = self.get_session_info( )
-    self.device.add_option('model', self.device.fields.get('model', self.get_model( )))
+    model = self.device.get('model', None)
+    if model is None:
+      model = self.get_model( )
+    self.pump.setModel(number=self.device.get('model', ''))
+    uses_extra = self.device.get('extra', None)
+    config = self.device
+    if uses_extra:
+      config = self.device.extra
+    config.add_option('model', self.device.get('model', model))
   def get_model (self):
     model = self.pump.read_model( ).getData( )
     return model
   def setup_medtronic (self):
     log = logging.getLogger(decocare.__name__)
-    log.setLevel(logging.INFO)
-    log.addHandler(logging.handlers.SysLogHandler(address='/dev/log'))
+    level = getattr(logging, self.device.get('logLevel', 'WARN'))
+    address = self.device.get('logAddress', '/dev/log')
+    log.setLevel(level)
+    for previous in log.handlers[:]:
+      log.removeHandler(previous)
+    log.addHandler(logging.handlers.SysLogHandler(address=address))
     self.uart = stick.Stick(link.Link(self.scanner( )))
     self.uart.open( )
-    serial = self.device.fields['serial']
+    serial = self.device.get('serial')
     self.pump = session.Pump(self.uart, serial)
     stats = self.uart.interface_stats( )
   def main (self, args, app):
@@ -189,10 +210,17 @@ class read_clock (MedtronicTask):
   def main (self, args, app):
     return self.pump.model.read_clock( )
 
+
 class SameNameCommand (MedtronicTask):
   def main (self, args, app):
     name = self.__class__.__name__.split('.').pop( )
     return getattr(self.pump.model, name)(**self.get_params(args))
+
+class SelectedNameCommand (MedtronicTask):
+  def main (self, args, app):
+    name = self.selected
+    return getattr(self.pump.model, name)(**self.get_params(args))
+
 
 @use( )
 class read_temp_basal (SameNameCommand):
@@ -247,12 +275,18 @@ class read_battery_status (SameNameCommand):
   """ Check battery status. """
 
 @use( )
-class read_bg_targets (SameNameCommand):
+class read_bg_targets (SelectedNameCommand):
   """ Read bg targets. """
+  selected = 'read_bg_targets'
 
 @use( )
 class read_insulin_sensitivies (SameNameCommand):
-  """ Read insulin sensitivies. """
+  """ XXX: Deprecated.  Don't use.  Use read_insulin_sensitivities instead. """
+
+
+@use( )
+class read_insulin_sensitivities (SameNameCommand):
+  """ Read insulin sensitivities. """
 
 
 @use( )
@@ -285,13 +319,48 @@ class InputProgramRequired (MedtronicTask):
 @use( )
 class set_temp_basal (InputProgramRequired):
   """ Set temporary basal rates.
+
+  Requires json input with the following keys defined:
+    * `temp` - the type of temporary rate, `percent` or `absolute`
+    * `rate` - The temporary rate, in units.  Examples, 0.0, 1.2, 0.1
+    * `duration` - The duration in minutes of the temporary rate.  The duration must be multiples of 30 minutes.
+
+
+  Eg, actively canceling a rate:
+  { "temp": "absolute", "rate": 0, "duration": 0 }
+
+
+  Zero basal for half hour:
+  { "temp": "absolute", "rate": 0, "duration": 30 }
+
+
+  One and a half units for one hour:
+  { "temp": "absolute", "rate": 1.5, "duration": 60 }
   """
+  required_inputs = [ 'duration', 'rate' ]
   def upload_program (self, program):
+    missing = [ ]
+    for req in self.required_inputs:
+      if not req in program:
+        missing.append(req)
+    if len(missing) > 0:
+      return dict(error="missing required input fields", missing=missing, input=dict(**program))
     return self.pump.model.set_temp_basal(**program)
 
 @use( )
 class bolus (InputProgramRequired):
   """ Send bolus.
+
+  Requires json input with the following keys defined:
+    * `units` - Number of units to bolus.
+
+
+  Zero point one units:
+  { "units": 0.1 }
+
+
+  Two units:
+  { "units": 2 }
   """
   def upload_program (self, program):
     return self.pump.model.bolus(**program)
@@ -420,6 +489,3 @@ def get_uses (device, config):
   all_uses = known_uses[:] + use.get_uses(device, config)
   all_uses.sort(key=lambda usage: getattr(usage, 'sortOrder', usage.__name__))
   return all_uses
-
-
-

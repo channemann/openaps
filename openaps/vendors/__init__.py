@@ -1,5 +1,5 @@
 
-import dexcom, medtronic, process
+import dexcom, medtronic, process, units
 
 from openaps.cli.subcommand import Subcommand
 from openaps.cli.commandmapapp import CommandMapApp
@@ -16,7 +16,7 @@ def find_plugins (config):
   return [ v.get_module( ) for v in vendors ]
 
 def get_vendors ( ):
-  return [ dexcom, medtronic, process ]
+  return [ dexcom, medtronic, process, units ]
 
 def get_map (config=None):
   vendors = all_vendors(config)
@@ -25,6 +25,12 @@ def get_map (config=None):
 
 def lookup (name, config=None):
   return get_map(config)[name]
+
+def lookup_dotted (name, config=None):
+  vendors = all_vendors(config)
+  names = [ v.__name__ for v in vendors ]
+  return dict(zip(names, vendors))[name]
+
 
 def all_vendors (config=None):
   return get_vendors( ) + find_plugins(config)
